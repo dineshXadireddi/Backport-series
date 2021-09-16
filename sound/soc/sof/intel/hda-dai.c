@@ -16,6 +16,13 @@
 
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA)
 
+<<<<<<< HEAD
+=======
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_PROBES)
+#include "../sof-probes.h"
+#endif
+
+>>>>>>> 7bbdda800900... ASoC: SOF: probe: Merge and clean up the probe and compress files
 struct hda_pipe_params {
 	u8 host_dma_id;
 	u8 link_dma_id;
