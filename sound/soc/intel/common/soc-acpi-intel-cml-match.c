@@ -9,22 +9,22 @@
 #include <sound/soc-acpi.h>
 #include <sound/soc-acpi-intel-match.h>
 
-static const struct snd_soc_acpi_codecs rt1011_spk_codecs = {
+static struct snd_soc_acpi_codecs rt1011_spk_codecs = {
 	.num_codecs = 1,
 	.codecs = {"10EC1011"}
 };
 
-static const struct snd_soc_acpi_codecs rt1015_spk_codecs = {
+static struct snd_soc_acpi_codecs rt1015_spk_codecs = {
 	.num_codecs = 1,
 	.codecs = {"10EC1015"}
 };
 
-static const struct snd_soc_acpi_codecs max98357a_spk_codecs = {
+static struct snd_soc_acpi_codecs max98357a_spk_codecs = {
 	.num_codecs = 1,
 	.codecs = {"MX98357A"}
 };
 
-static const struct snd_soc_acpi_codecs max98390_spk_codecs = {
+static struct snd_soc_acpi_codecs max98390_spk_codecs = {
 	.num_codecs = 1,
 	.codecs = {"MX98390"}
 };
