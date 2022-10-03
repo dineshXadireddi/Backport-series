@@ -14,18 +14,31 @@
 #include <sound/sof.h>
 #include "sof-priv.h"
 #include "ops.h"
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_PROBES)
-#include "sof-probes.h"
-#endif
 
 /* see SOF_DBG_ flags */
-int sof_core_debug =  IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_ENABLE_FIRMWARE_TRACE);
+static int sof_core_debug =  IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_ENABLE_FIRMWARE_TRACE);
 module_param_named(sof_debug, sof_core_debug, int, 0444);
 MODULE_PARM_DESC(sof_debug, "SOF core debug options (0x0 all off)");
 
 /* SOF defaults if not provided by the platform in ms */
 #define TIMEOUT_DEFAULT_IPC_MS  500
 #define TIMEOUT_DEFAULT_BOOT_MS 2000
+
+/**
+ * sof_debug_check_flag - check if a given flag(s) is set in sof_core_debug
+ * @mask: Flag or combination of flags to check
+ *
+ * Returns true if all bits set in mask is also set in sof_core_debug, otherwise
+ * false
+ */
+bool sof_debug_check_flag(int mask)
+{
+	if ((sof_core_debug & mask) == mask)
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL(sof_debug_check_flag);
 
 /*
  * FW Panic/fault handling.
@@ -52,23 +65,33 @@ static const struct sof_panic_msg panic_msg[] = {
 	{SOF_IPC_PANIC_ASSERT, "assertion failed"},
 };
 
-/*
+/**
+ * sof_print_oops_and_stack - Handle the printing of DSP oops and stack trace
+ * @sdev: Pointer to the device's sdev
+ * @level: prink log level to use for the printing
+ * @panic_code: the panic code
+ * @tracep_code: tracepoint code
+ * @oops: Pointer to DSP specific oops data
+ * @panic_info: Pointer to the received panic information message
+ * @stack: Pointer to the call stack data
+ * @stack_words: Number of words in the stack data
+ *
  * helper to be called from .dbg_dump callbacks. No error code is
  * provided, it's left as an exercise for the caller of .dbg_dump
  * (typically IPC or loader)
  */
-void snd_sof_get_status(struct snd_sof_dev *sdev, u32 panic_code,
-			u32 tracep_code, void *oops,
-			struct sof_ipc_panic_info *panic_info,
-			void *stack, size_t stack_words)
+void sof_print_oops_and_stack(struct snd_sof_dev *sdev, const char *level,
+			      u32 panic_code, u32 tracep_code, void *oops,
+			      struct sof_ipc_panic_info *panic_info,
+			      void *stack, size_t stack_words)
 {
 	u32 code;
 	int i;
 
 	/* is firmware dead ? */
 	if ((panic_code & SOF_IPC_PANIC_MAGIC_MASK) != SOF_IPC_PANIC_MAGIC) {
-		dev_err(sdev->dev, "unexpected fault %#010x trace %#010x\n",
-			panic_code, tracep_code);
+		dev_printk(level, sdev->dev, "unexpected fault %#010x trace %#010x\n",
+			   panic_code, tracep_code);
 		return; /* no fault ? */
 	}
 
@@ -76,54 +99,76 @@ void snd_sof_get_status(struct snd_sof_dev *sdev, u32 panic_code,
 
 	for (i = 0; i < ARRAY_SIZE(panic_msg); i++) {
 		if (panic_msg[i].id == code) {
-			dev_err(sdev->dev, "reason: %s (%#x)\n", panic_msg[i].msg,
-				code & SOF_IPC_PANIC_CODE_MASK);
-			dev_err(sdev->dev, "trace point: %#010x\n", tracep_code);
+			dev_printk(level, sdev->dev, "reason: %s (%#x)\n",
+				   panic_msg[i].msg, code & SOF_IPC_PANIC_CODE_MASK);
+			dev_printk(level, sdev->dev, "trace point: %#010x\n", tracep_code);
 			goto out;
 		}
 	}
 
 	/* unknown error */
-	dev_err(sdev->dev, "unknown panic code: %#x\n", code & SOF_IPC_PANIC_CODE_MASK);
-	dev_err(sdev->dev, "trace point: %#010x\n", tracep_code);
+	dev_printk(level, sdev->dev, "unknown panic code: %#x\n",
+		   code & SOF_IPC_PANIC_CODE_MASK);
+	dev_printk(level, sdev->dev, "trace point: %#010x\n", tracep_code);
 
 out:
-	dev_err(sdev->dev, "panic at %s:%d\n", panic_info->filename,
-		panic_info->linenum);
-	sof_oops(sdev, oops);
-	sof_stack(sdev, oops, stack, stack_words);
+	dev_printk(level, sdev->dev, "panic at %s:%d\n", panic_info->filename,
+		   panic_info->linenum);
+	sof_oops(sdev, level, oops);
+	sof_stack(sdev, level, oops, stack, stack_words);
 }
-EXPORT_SYMBOL(snd_sof_get_status);
+EXPORT_SYMBOL(sof_print_oops_and_stack);
+
+/* Helper to manage DSP state */
+void sof_set_fw_state(struct snd_sof_dev *sdev, enum sof_fw_state new_state)
+{
+	if (sdev->fw_state == new_state)
+		return;
+
+	dev_dbg(sdev->dev, "fw_state change: %d -> %d\n", sdev->fw_state, new_state);
+	sdev->fw_state = new_state;
+
+	switch (new_state) {
+	case SOF_FW_BOOT_NOT_STARTED:
+	case SOF_FW_BOOT_COMPLETE:
+	case SOF_FW_CRASHED:
+		sof_client_fw_state_dispatcher(sdev);
+		fallthrough;
+	default:
+		break;
+	}
+}
+EXPORT_SYMBOL(sof_set_fw_state);
 
 /*
  *			FW Boot State Transition Diagram
  *
- *    +-----------------------------------------------------------------------+
- *    |									      |
- * ------------------	     ------------------				      |
- * |		    |	     |		      |				      |
- * |   BOOT_FAILED  |	     |  READY_FAILED  |-------------------------+     |
- * |		    |	     |	              |				|     |
- * ------------------	     ------------------				|     |
- *	^			    ^					|     |
- *	|			    |					|     |
- * (FW Boot Timeout)		(FW_READY FAIL)				|     |
- *	|			    |					|     |
- *	|			    |					|     |
- * ------------------		    |		   ------------------	|     |
- * |		    |		    |		   |		    |	|     |
- * |   IN_PROGRESS  |---------------+------------->|    COMPLETE    |	|     |
- * |		    | (FW Boot OK)   (FW_READY OK) |		    |	|     |
- * ------------------				   ------------------	|     |
- *	^						|		|     |
- *	|						|		|     |
- * (FW Loading OK)			       (System Suspend/Runtime Suspend)
- *	|						|		|     |
- *	|						|		|     |
- * ------------------		------------------	|		|     |
- * |		    |		|		 |<-----+		|     |
- * |   PREPARE	    |		|   NOT_STARTED  |<---------------------+     |
- * |		    |		|		 |<---------------------------+
+ *    +----------------------------------------------------------------------+
+ *    |									     |
+ * ------------------	     ------------------				     |
+ * |		    |	     |		      |				     |
+ * |   BOOT_FAILED  |<-------|  READY_FAILED  |				     |
+ * |		    |<--+    |	              |	   ------------------	     |
+ * ------------------	|    ------------------	   |		    |	     |
+ *	^		|	    ^		   |	CRASHED	    |---+    |
+ *	|		|	    |		   |		    |	|    |
+ * (FW Boot Timeout)	|	(FW_READY FAIL)	   ------------------	|    |
+ *	|		|	    |		     ^			|    |
+ *	|		|	    |		     |(DSP Panic)	|    |
+ * ------------------	|	    |		   ------------------	|    |
+ * |		    |	|	    |		   |		    |	|    |
+ * |   IN_PROGRESS  |---------------+------------->|    COMPLETE    |	|    |
+ * |		    | (FW Boot OK)   (FW_READY OK) |		    |	|    |
+ * ------------------	|			   ------------------	|    |
+ *	^		|				|		|    |
+ *	|		|				|		|    |
+ * (FW Loading OK)	|			(System Suspend/Runtime Suspend)
+ *	|		|				|		|    |
+ *	|	(FW Loading Fail)			|		|    |
+ * ------------------	|	------------------	|		|    |
+ * |		    |	|	|		 |<-----+		|    |
+ * |   PREPARE	    |---+	|   NOT_STARTED  |<---------------------+    |
+ * |		    |		|		 |<--------------------------+
  * ------------------		------------------
  *    |	    ^			    |	   ^
  *    |	    |			    |	   |
@@ -186,6 +231,7 @@ static int sof_probe_continue(struct snd_sof_dev *sdev)
 	if (ret < 0) {
 		dev_err(sdev->dev, "error: failed to load DSP firmware %d\n",
 			ret);
+		sof_set_fw_state(sdev, SOF_FW_BOOT_FAILED);
 		goto fw_load_err;
 	}
 
@@ -199,10 +245,11 @@ static int sof_probe_continue(struct snd_sof_dev *sdev)
 	if (ret < 0) {
 		dev_err(sdev->dev, "error: failed to boot DSP firmware %d\n",
 			ret);
+		sof_set_fw_state(sdev, SOF_FW_BOOT_FAILED);
 		goto fw_run_err;
 	}
 
-	if (sof_core_debug & SOF_DBG_ENABLE_TRACE) {
+	if (sof_debug_check_flag(SOF_DBG_ENABLE_TRACE)) {
 		sdev->dtrace_is_supported = true;
 
 		/* init DMA trace */
@@ -237,6 +284,12 @@ static int sof_probe_continue(struct snd_sof_dev *sdev)
 		goto fw_trace_err;
 	}
 
+	ret = sof_register_clients(sdev);
+	if (ret < 0) {
+		dev_err(sdev->dev, "failed to register clients %d\n", ret);
+		goto sof_machine_err;
+	}
+
 	/*
 	 * Some platforms in SOF, ex: BYT, may not have their platform PM
 	 * callbacks set. Increment the usage count so as to
@@ -252,6 +305,8 @@ static int sof_probe_continue(struct snd_sof_dev *sdev)
 
 	return 0;
 
+sof_machine_err:
+	snd_sof_machine_unregister(sdev, plat_data);
 fw_trace_err:
 	snd_sof_free_trace(sdev);
 fw_run_err:
@@ -300,10 +355,6 @@ int snd_sof_device_probe(struct device *dev, struct snd_sof_pdata *plat_data)
 
 	sdev->pdata = plat_data;
 	sdev->first_boot = true;
-	sof_set_fw_state(sdev, SOF_FW_BOOT_NOT_STARTED);
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_PROBES)
-	sdev->extractor_stream_tag = SOF_PROBE_INVALID_NODE_ID;
-#endif
 	dev_set_drvdata(dev, sdev);
 
 	/* check all mandatory ops */
@@ -321,9 +372,14 @@ int snd_sof_device_probe(struct device *dev, struct snd_sof_pdata *plat_data)
 	INIT_LIST_HEAD(&sdev->widget_list);
 	INIT_LIST_HEAD(&sdev->dai_list);
 	INIT_LIST_HEAD(&sdev->route_list);
+	INIT_LIST_HEAD(&sdev->ipc_client_list);
+	INIT_LIST_HEAD(&sdev->ipc_rx_handler_list);
+	INIT_LIST_HEAD(&sdev->fw_state_handler_list);
 	spin_lock_init(&sdev->ipc_lock);
 	spin_lock_init(&sdev->hw_lock);
 	mutex_init(&sdev->power_state_access);
+	mutex_init(&sdev->ipc_client_mutex);
+	mutex_init(&sdev->client_event_handler_mutex);
 
 	/* set default timeouts if none provided */
 	if (plat_data->desc->ipc_timeout == 0)
@@ -334,6 +390,8 @@ int snd_sof_device_probe(struct device *dev, struct snd_sof_pdata *plat_data)
 		sdev->boot_timeout = TIMEOUT_DEFAULT_BOOT_MS;
 	else
 		sdev->boot_timeout = plat_data->desc->boot_timeout;
+
+	sof_set_fw_state(sdev, SOF_FW_BOOT_NOT_STARTED);
 
 	if (IS_ENABLED(CONFIG_SND_SOC_SOF_PROBE_WORK_QUEUE)) {
 		INIT_WORK(&sdev->probe_work, sof_probe_work);
@@ -361,6 +419,12 @@ int snd_sof_device_remove(struct device *dev)
 
 	if (IS_ENABLED(CONFIG_SND_SOC_SOF_PROBE_WORK_QUEUE))
 		cancel_work_sync(&sdev->probe_work);
+
+	/*
+	 * Unregister any registered client device first before IPC and debugfs
+	 * to allow client drivers to be removed cleanly
+	 */
+	sof_unregister_clients(sdev);
 
 	/*
 	 * Unregister machine driver. This will unbind the snd_card which
@@ -414,3 +478,4 @@ MODULE_AUTHOR("Liam Girdwood");
 MODULE_DESCRIPTION("Sound Open Firmware (SOF) Core");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS("platform:sof-audio");
+MODULE_IMPORT_NS(SND_SOC_SOF_CLIENT);

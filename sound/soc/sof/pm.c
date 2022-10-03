@@ -130,6 +130,7 @@ static int sof_resume(struct device *dev, bool runtime_resume)
 		dev_err(sdev->dev,
 			"error: failed to load DSP firmware after resume %d\n",
 			ret);
+		sof_set_fw_state(sdev, SOF_FW_BOOT_FAILED);
 		return ret;
 	}
 
@@ -144,6 +145,7 @@ static int sof_resume(struct device *dev, bool runtime_resume)
 		dev_err(sdev->dev,
 			"error: failed to boot DSP firmware after resume %d\n",
 			ret);
+		sof_set_fw_state(sdev, SOF_FW_BOOT_FAILED);
 		return ret;
 	}
 
@@ -165,6 +167,9 @@ static int sof_resume(struct device *dev, bool runtime_resume)
 		return ret;
 	}
 
+	/* Notify clients not managed by pm framework about core resume */
+	sof_resume_clients(sdev);
+
 	/* notify DSP of system resume */
 	ret = sof_send_pm_ctx_ipc(sdev, SOF_IPC_PM_CTX_RESTORE);
 	if (ret < 0)
@@ -178,6 +183,7 @@ static int sof_resume(struct device *dev, bool runtime_resume)
 static int sof_suspend(struct device *dev, bool runtime_suspend)
 {
 	struct snd_sof_dev *sdev = dev_get_drvdata(dev);
+	pm_message_t pm_state;
 	u32 target_state = 0;
 	int ret;
 
@@ -203,15 +209,22 @@ static int sof_suspend(struct device *dev, bool runtime_suspend)
 	}
 
 	target_state = snd_sof_dsp_power_target(sdev);
+	pm_state.event = target_state;
 
 	/* Skip to platform-specific suspend if DSP is entering D0 */
-	if (target_state == SOF_DSP_PM_D0)
+	if (target_state == SOF_DSP_PM_D0) {
+		/* Notify clients not managed by pm framework about core suspend */
+		sof_suspend_clients(sdev, pm_state);
 		goto suspend;
+	}
 
 	sof_tear_down_pipelines(sdev, false);
 
 	/* release trace */
 	snd_sof_release_trace(sdev);
+
+	/* Notify clients not managed by pm framework about core suspend */
+	sof_suspend_clients(sdev, pm_state);
 
 #if IS_ENABLED(CONFIG_SND_SOC_SOF_DEBUG_ENABLE_DEBUGFS_CACHE)
 	/* cache debugfs contents during runtime suspend */
@@ -311,6 +324,14 @@ int snd_sof_prepare(struct device *dev)
 
 	/* will suspend to S3 by default */
 	sdev->system_suspend_target = SOF_SUSPEND_S3;
+
+	/*
+	 * if the firmware is crashed or boot failed then we try to aim for S3
+	 * to reboot the firmware
+	 */
+	if (sdev->fw_state == SOF_FW_CRASHED ||
+	    sdev->fw_state == SOF_FW_BOOT_FAILED)
+		return 0;
 
 	if (!desc->use_acpi_target_states)
 		return 0;
