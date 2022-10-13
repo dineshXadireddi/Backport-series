@@ -82,9 +82,24 @@ irqreturn_t cnl_ipc_irq_thread(int irq, void *context)
 			 msg, msg_ext);
 
 		/* handle messages from DSP */
-		if ((hipctdr & SOF_IPC_PANIC_MAGIC_MASK) ==
-		   SOF_IPC_PANIC_MAGIC) {
-			snd_sof_dsp_panic(sdev, HDA_DSP_PANIC_OFFSET(msg_ext));
+		if ((hipctdr & SOF_IPC_PANIC_MAGIC_MASK) == SOF_IPC_PANIC_MAGIC) {
+			struct sof_intel_hda_dev *hda = sdev->pdata->hw_pdata;
+			bool non_recoverable = true;
+
+			/*
+			 * This is a PANIC message!
+			 *
+			 * If it is arriving during firmware boot and it is not
+			 * the last boot attempt then change the non_recoverable
+			 * to false as the DSP might be able to boot in the next
+			 * iteration(s)
+			 */
+			if (sdev->fw_state == SOF_FW_BOOT_IN_PROGRESS &&
+			    hda->boot_iteration < HDA_FW_BOOT_ATTEMPTS)
+				non_recoverable = false;
+
+			snd_sof_dsp_panic(sdev, HDA_DSP_PANIC_OFFSET(msg_ext),
+					  non_recoverable);
 		} else {
 			snd_sof_ipc_msgs_rx(sdev);
 		}
@@ -146,11 +161,9 @@ static void cnl_ipc_dsp_done(struct snd_sof_dev *sdev)
 static bool cnl_compact_ipc_compress(struct snd_sof_ipc_msg *msg,
 				     u32 *dr, u32 *dd)
 {
-	struct sof_ipc_pm_gate *pm_gate;
+	struct sof_ipc_pm_gate *pm_gate = msg->msg_data;
 
-	if (msg->header == (SOF_IPC_GLB_PM_MSG | SOF_IPC_PM_GATE)) {
-		pm_gate = msg->msg_data;
-
+	if (pm_gate->hdr.cmd == (SOF_IPC_GLB_PM_MSG | SOF_IPC_PM_GATE)) {
 		/* send the compact message via the primary register */
 		*dr = HDA_IPC_MSG_COMPACT | HDA_IPC_PM_GATE;
 
@@ -283,15 +296,7 @@ const struct snd_sof_dsp_ops sof_cnl_ops = {
 	.pcm_hw_free	= hda_dsp_stream_hw_free,
 	.pcm_trigger	= hda_dsp_pcm_trigger,
 	.pcm_pointer	= hda_dsp_pcm_pointer,
-
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_PROBES)
-	/* probe callbacks */
-	.probe_assign	= hda_probe_compr_assign,
-	.probe_free	= hda_probe_compr_free,
-	.probe_set_params	= hda_probe_compr_set_params,
-	.probe_trigger	= hda_probe_compr_trigger,
-	.probe_pointer	= hda_probe_compr_pointer,
-#endif
+	.pcm_ack	= hda_dsp_pcm_ack,
 
 	/* firmware loading */
 	.load_firmware = snd_sof_load_firmware_raw,
@@ -313,6 +318,10 @@ const struct snd_sof_dsp_ops sof_cnl_ops = {
 	.trace_init = hda_dsp_trace_init,
 	.trace_release = hda_dsp_trace_release,
 	.trace_trigger = hda_dsp_trace_trigger,
+
+	/* client ops */
+	.register_ipc_clients = hda_register_clients,
+	.unregister_ipc_clients = hda_unregister_clients,
 
 	/* DAI drivers */
 	.drv		= skl_dai,
@@ -351,6 +360,9 @@ const struct sof_intel_dsp_desc cnl_chip_info = {
 	.rom_init_timeout	= 300,
 	.ssp_count = CNL_SSP_COUNT,
 	.ssp_base_offset = CNL_SSP_BASE_OFFSET,
+	.sdw_shim_base = SDW_SHIM_BASE,
+	.sdw_alh_base = SDW_ALH_BASE,
+	.check_sdw_irq	= hda_common_check_sdw_irq,
 };
 EXPORT_SYMBOL_NS(cnl_chip_info, SND_SOC_SOF_INTEL_HDA_COMMON);
 
@@ -374,5 +386,8 @@ const struct sof_intel_dsp_desc jsl_chip_info = {
 	.rom_init_timeout	= 300,
 	.ssp_count = ICL_SSP_COUNT,
 	.ssp_base_offset = CNL_SSP_BASE_OFFSET,
+	.sdw_shim_base = SDW_SHIM_BASE,
+	.sdw_alh_base = SDW_ALH_BASE,
+	.check_sdw_irq	= hda_common_check_sdw_irq,
 };
 EXPORT_SYMBOL_NS(jsl_chip_info, SND_SOC_SOF_INTEL_HDA_COMMON);

@@ -173,8 +173,23 @@ irqreturn_t hda_dsp_ipc_irq_thread(int irq, void *context)
 
 		/* handle messages from DSP */
 		if ((hipct & SOF_IPC_PANIC_MAGIC_MASK) == SOF_IPC_PANIC_MAGIC) {
-			/* this is a PANIC message !! */
-			snd_sof_dsp_panic(sdev, HDA_DSP_PANIC_OFFSET(msg_ext));
+			struct sof_intel_hda_dev *hda = sdev->pdata->hw_pdata;
+			bool non_recoverable = true;
+
+			/*
+			 * This is a PANIC message!
+			 *
+			 * If it is arriving during firmware boot and it is not
+			 * the last boot attempt then change the non_recoverable
+			 * to false as the DSP might be able to boot in the next
+			 * iteration(s)
+			 */
+			if (sdev->fw_state == SOF_FW_BOOT_IN_PROGRESS &&
+			    hda->boot_iteration < HDA_FW_BOOT_ATTEMPTS)
+				non_recoverable = false;
+
+			snd_sof_dsp_panic(sdev, HDA_DSP_PANIC_OFFSET(msg_ext),
+					  non_recoverable);
 		} else {
 			/* normal message - process normally */
 			snd_sof_ipc_msgs_rx(sdev);
@@ -240,13 +255,13 @@ int hda_ipc_msg_data(struct snd_sof_dev *sdev,
 
 		hda_stream = container_of(hstream,
 					  struct sof_intel_hda_stream,
-					  hda_stream.hstream);
+					  hext_stream.hstream);
 
 		/* The stream might already be closed */
 		if (!hstream)
 			return -ESTRPIPE;
 
-		sof_mailbox_read(sdev, hda_stream->stream.posn_offset, p, sz);
+		sof_mailbox_read(sdev, hda_stream->sof_intel_stream.posn_offset, p, sz);
 	}
 
 	return 0;
@@ -262,17 +277,17 @@ int hda_ipc_pcm_params(struct snd_sof_dev *sdev,
 	size_t posn_offset = reply->posn_offset;
 
 	hda_stream = container_of(hstream, struct sof_intel_hda_stream,
-				  hda_stream.hstream);
+				  hext_stream.hstream);
 
 	/* check for unaligned offset or overflow */
 	if (posn_offset > sdev->stream_box.size ||
 	    posn_offset % sizeof(struct sof_ipc_stream_posn) != 0)
 		return -EINVAL;
 
-	hda_stream->stream.posn_offset = sdev->stream_box.offset + posn_offset;
+	hda_stream->sof_intel_stream.posn_offset = sdev->stream_box.offset + posn_offset;
 
 	dev_dbg(sdev->dev, "pcm: stream dir %d, posn mailbox offset is %zu",
-		substream->stream, hda_stream->stream.posn_offset);
+		substream->stream, hda_stream->sof_intel_stream.posn_offset);
 
 	return 0;
 }
